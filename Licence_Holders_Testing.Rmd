@@ -1,0 +1,380 @@
+---
+title: "Licence holders testing"
+author: "Gabriel"
+date: "22/05/2023"
+output: html_document
+---
+
+This script is to review the licence holders data. Such a review serves three purposes.
+
+Firstly, the columns in the datasets are identified so that the filters performed in the main script can be established, correct matching keys used, and necessary data extracted.
+
+Secondly, getting to know the column names and the values in them will allow to set up the data checks for when there are data quality issues or the dataset is updated (e.g. the 'Casino' activity may be split into two in the dataset - in such a case we want to have a warning in place so that the code can be adjusted accordingly).
+
+Thirdly, it is checked which summary statistics functions and visualisations are best to be used on the dataset.
+
+Note that the numbers presented here are correct as per the data feed from 22nd May 23. This script is just to show the testing done and the numbers presented are just for illustrative purposes - the actual code script will be dynamic.
+
+The bulk of this script will focus on licence register document. First thing to do then is to load the libraries so that the chosen functions can be used and to load the licence register. Other datasets will be analysed later.
+
+
+``` {r load_data}
+
+#Load the libraries needed in this script
+library(readr) #To load the datasets
+library(tidyverse) #To manipulate the data in tidyverse
+library(janitor) #To spot duplicates
+library(stringr) #To get numbers of commas in specific strings
+library(ggplot2) #For graphs
+
+#Load the licence register
+licenceRegisterRaw <- read_csv("https://www.gamblingcommission.gov.uk/downloads/business-licence-register-licences.csv")
+
+```
+When loading up the dataset, RStudio shows such a message:
+------------------------------------------------------------------------------------------------------------------
+-- Column specification --------------------------------------------------------------------------------------
+cols(
+  `Account Number` = col_double(),
+  `Licence Number` = col_character(),
+  Status = col_character(),
+  Type = col_character(),
+  Activity = col_character(),
+  `Start Date` = col_datetime(format = ""),
+  `End Date` = col_datetime(format = "")
+)
+
+3944 parsing failures.
+row col  expected    actual                                                                                     file
+  1  -- 7 columns 6 columns 'https://www.gamblingcommission.gov.uk/downloads/business-licence-register-licences.csv'
+  2  -- 7 columns 6 columns 'https://www.gamblingcommission.gov.uk/downloads/business-licence-register-licences.csv'
+  3  -- 7 columns 6 columns 'https://www.gamblingcommission.gov.uk/downloads/business-licence-register-licences.csv'
+  4  -- 7 columns 6 columns 'https://www.gamblingcommission.gov.uk/downloads/business-licence-register-licences.csv'
+  5  -- 7 columns 6 columns 'https://www.gamblingcommission.gov.uk/downloads/business-licence-register-licences.csv'
+... ... ......... ......... ........................................................................................
+See problems(...) for more details.
+-------------------------------------------------------------------------------------------------------------------
+
+The message showed the column types as R interpreted them. They do seem to make sense and unless some evidence is found to the contrary, they will be adopted in the main script. The message also indicates that in 3944 out of 4773 rows there were parsing failures. It seems that it just refers to the fact that the majority of rows in the 'End Date' field were empty. Let's check it, making sure there are no other NAs in the dataset.
+
+``` {r check_nas}
+
+#Check how many NAs are there in each column
+licenceRegisterRaw %>%
+  select(everything()) %>%
+  summarise(across(everything(), ~ sum(is.na(.x))))
+
+```
+
+It turns out that there are 103 instances where the start date is missing as well. It seems that they refer to the situations where the status of a licence is 'pending'. Let's check if it's true. Also check the statuses where the end date is missing and those where it is non-missing.
+
+``` {r check_missing_dates}
+
+#Statuses where start date is missing
+missingStartDateStatuses <- licenceRegisterRaw %>% filter(is.na(`Start Date`)) %>% group_by(Status) %>% summarise(Count = n())
+missingStartDateStatuses
+
+#Statuses where end date is missing
+missingEndDateStatuses <- licenceRegisterRaw %>% filter(is.na(`End Date`)) %>% group_by(Status) %>% summarise(Count = n())
+missingEndDateStatuses
+
+#Statuses where end date is NOT missing
+nonMissingEndDateStatuses <- licenceRegisterRaw %>% filter(!is.na(`End Date`)) %>% group_by(Status) %>% summarise(Count = n())
+nonMissingEndDateStatuses
+
+```
+
+Indeed, the only status found where the start date is missing is 'Pending', which seems fine - a licence that is pending has not started yet. Anyway, Gamstop is not interested in 'Pending' licences.
+
+Statuses of licences with non-missing end date ('Forfeited', 'Lapsed', 'Revoked' 'Revoked - Non Payment of Fee', 'Surrendered', 'Suspended') also make sense.
+
+Most statuses of licences with missing end dates are also fine ('Active', 'Pending'). However, there is one 'Surrendered' licence with a missing end date. In principle, I was asked to restrict my search to 'Active' licences, but an instance of a 'Surrendered' licence with a missing end date may suggest data quality issues and may perhaps refer to a licence that is in fact 'Active'. Let's check this instance.
+
+``` {r surrendered_missing_end_date}
+
+#Extract the row corresponding to a surrendered licence without an end date
+missingEndDateSurrendered <- licenceRegisterRaw %>% filter(Status == "Surrendered" & is.na(`End Date`))
+#Comment from 23rd May - the issue got fixed - the dataset indeed changes very often
+
+```
+
+That licence is of type 'Remote' and the activity is 'Casino', which is very much what Gamstop is interested in. I am flagging this business so that Gamstop can ask the provider of the data about this account and why the end date is missing if the status is 'Surrendered'. In the main script, a warning will be produced, as I think a surrendered licence should have its end date.
+
+This is it as per start/end dates and statuses. In the main script, any statuses other than those present in the dataset as per 22nd May 23, or any mismatch between the presence/lack of the start/end date and the status will be flagged.
+
+Let's turn our attention to checking for duplicates - just by eyeballing the data, it can be seen that there are multiple rows per account/licence number, but they seem to refer to different activities for the same trader (as the rest of the datasets in the register are based on the account number). Check if this is the case (I am doing it now rather than before looking at start/end dates and statuses, as I was preoccupied with the very loading of the data being performed correctly).
+
+``` {r check_duplicates}
+
+pureDuplicates <- licenceRegisterRaw %>% get_dupes() #These are all pending - not of our interest
+
+accountNumberDuplicates <- licenceRegisterRaw %>%  get_dupes(`Account Number`) #Very many (3207), but that's normal
+licenceNumberDuplicates <- licenceRegisterRaw %>%  get_dupes(`Account Number`,`Licence Number`) #Much fewer (1703), but still with different activity types per licence - ok
+accountLicenceActivityDuplicates <- licenceRegisterRaw %>%  get_dupes(`Account Number`,`Licence Number`, Activity) #Same number as pure duplicates - makes sense
+licenceActivityDuplicates <- licenceRegisterRaw %>%  get_dupes(`Licence Number`, Activity) #Again same number as pure duplicates
+
+```
+
+Duplicates check established the following:
+  1. There are pure duplicates when the status is pending - not of our concern as long as it does not happend to active licences.
+  2. There are multiple rows per account number, but they refer to different licences and activities, which makes sense.
+  
+There will still be duplicates with respect to the account number when the filters are applied. The output in the main script will be produced without such duplicates, but with the corresponding activities concatenated and minimum start dates extracted should someone wish to look this data up and for the visualisations to be produced.
+
+Before filtering the data and having a look at potential summary stats/visualisations to use in the main script, let's have a look at the two remaining columns - type and activity.
+
+``` {r type_activity}
+
+#Frequency tables for type and activity column and a cross-reference table between the two fields
+typeSummary <- licenceRegisterRaw %>% group_by(Type) %>% summarise(Count = n())
+activitySummary <- licenceRegisterRaw %>% group_by(Activity) %>% summarise(Count = n())
+activityTypeSummary <- licenceRegisterRaw %>% group_by(Type, Activity) %>% tally(name = "Count") 
+
+```
+
+'Ancillary remote' type potentially seems of interest. I won't include it as I was not instructed to do so, but I would flag it with colleagues. The 26 kinds of activity currently present will be noted up and a warning will be produced if a different activity appears in the future.
+
+The checks performed on the dataset in the main script after applying specific column types and before performing the filters will then be as follows:
+  1. Are there any new columns in the licence register?
+  2. Are there any missing values or NAs in the non-date variables?
+  3. Are there missing start dates where the status is not 'Pending'?
+  4. Are there missing end dates for any status other than 'Active' or 'Pending'?
+  5. Are there non-missing end dates where the status is 'Active' or 'Pending'? 
+  6. Are there any pure duplicates other than where the status is 'Pending'?
+  7. Are there any duplicated combinations of account number, licence number and activity?
+  8. Are there any values of status, type or activity not identified before?
+
+A 'yes' answer to any of these will trigger a warning. Checks 1 and 2 will be also performed on the other 3 datasets, with a difference that any NAs will trigger a warning.
+
+Now filter the licence register. 
+
+``` {r filter_licence_register}
+
+#Filters as per the tasking
+licenceRegisterFiltered <- licenceRegisterRaw %>% filter(Status == "Active" & Type == "Remote" & Activity %in% c("Bingo","Casino","External Lottery Manager", "General Betting Standard - Real Event", "General Betting Standard - Virtual Event", "Pool Betting")) %>% select(c(`Account Number`,`Licence Number`,Activity, `Start Date`))
+
+#Duplicated account numbers
+filteredAccountNumberDuplicates <- licenceRegisterFiltered %>%  get_dupes(`Account Number`)
+
+#Duplicated combinations of account number and licence number
+filteredAccountLicenceNumberDuplicates <- licenceRegisterFiltered %>%  get_dupes(`Account Number`,`Licence Number`)
+
+```
+
+438 account/licence/activity combinations of interest were extracted, but still the majority of account numbers appear more than once. One account number is corresponding to one licence number here (presumably because previously multiple licence numbers were connected to previous revoked/surrendered/etc. licences). In the main script, it will be checked that there is only one licence number for each account number (at this step), and a warning will be produced if it's not the case. Minimum licence start date will be extracted, activity types concatenated, and duplicates removed. 
+
+``` {r cleanse_licences_data}
+
+#Concatenate activities per account
+licenceRegisterFilteredActivitiesCatted <- licenceRegisterFiltered %>%
+  group_by(`Account Number`) %>%
+  summarise(Activity_Catted = str_c(Activity, collapse = ', '), .groups = 'drop')
+
+#Get the minimum start date for the licences of each account number
+licenceRegisterFilteredMinDates <- licenceRegisterFiltered %>% 
+  group_by(`Account Number`) %>% 
+  summarise(Min_Start_Date = min(`Start Date`))
+
+#Inner joins are safe here because the datasets joined ultimately come from one datasetof the same account numbers
+
+#Join account and licence numbers with concatenated activities
+licenceRegisterFilteredCleansed <- inner_join(licenceRegisterFiltered %>% select(`Account Number`,`Licence Number`) %>% distinct(), licenceRegisterFilteredActivitiesCatted, by = "Account Number")
+
+#Join account and licence numbers and concatenated activity types with minimum start dates
+licenceRegisterFilteredCleansed <- inner_join(licenceRegisterFilteredCleansed, licenceRegisterFilteredMinDates, by = "Account Number") #I checked account numbers 400, 9177 and 45322 and I am satisfied the cat/min function and the join were performed correctly
+
+```
+
+Review the other 3 datasets. Start with domain names.
+
+``` {r domain_names_raw}
+
+domainNamesRaw <- read_csv("https://www.gamblingcommission.gov.uk/downloads/business-licence-register-domain-names.csv") 
+
+```
+  
+I was asked not to consider the licence holders with only non-UK domains.
+
+For the purposes of this exercise, I was to assume that the UK domains are those that end with 'uk'. However, after careful consideration of the impact of such an approach to the analysis (few providers left in the register), I decided to also include the domains finishing with 'com' (so that only the domains clearly indicating a non-UK address are removed). Under normal circumstances I would clarify it with colleagues. I will only consider active domains - I am conscious I was asked to restrict my search to 'active' licences, but I suppose the requirement to have at least one UK domain implies that such a domain has to be active (under normal circumstances, I would clarify it with colleagues/customers).
+
+I encountered an issue where the domain name included slashes (ie. the domain name was effectively a link within the website rather than a website itself). I wanted just to remove everything after the first slash and check if the last two characters of such a truncated strings are 'uk' or 'com', but I noted that there are some domains that start with 'https://', in which case the domain name would be truncated to the obviously incorrect 'https://'. Hence, 'https://' (or 'http://') will be removed when present, then anything after the first slash will be removed, and the UK domain indicator will have a value of 1 if such a truncated string ends in 'uk' or 'com' and 0 otherwise.
+
+``` {r domains_review_and_filter}
+
+#Operations will be performed on a newly created dataset rather than on the raw data. Filter out non-active domains
+domainNamesUkIndicator <- domainNamesRaw %>% mutate(Cleansed_Domain_Name = `Domain Name`) %>% filter(Status == "Active")
+
+#Removal of 'https://'
+domainNamesUkIndicator <- domainNamesUkIndicator %>%  mutate(Cleansed_Domain_Name = ifelse(startsWith(Cleansed_Domain_Name,"https://"),substring(Cleansed_Domain_Name,9),Cleansed_Domain_Name))
+
+#Same for 'http://'
+domainNamesUkIndicator <- domainNamesUkIndicator %>%  mutate(Cleansed_Domain_Name = ifelse(startsWith(Cleansed_Domain_Name,"http://"),substring(Cleansed_Domain_Name,8),Cleansed_Domain_Name))
+
+#Remove anything after the first slash
+domainNamesUkIndicator <- domainNamesUkIndicator %>% mutate(Cleansed_Domain_Name = gsub("/.*","",Cleansed_Domain_Name))
+
+#Produce the 'uk' indicator and look at the numbers of UK and non-UK domains
+domainNamesUkIndicator <- domainNamesUkIndicator %>% mutate(UkIndicator = ifelse(endsWith(Cleansed_Domain_Name,"uk") | endsWith(Cleansed_Domain_Name,"com"),1,0))
+domainNamesUkIndicator %>% group_by(UkIndicator) %>%  summarise(Count = n())
+domainNamesAccountDuplicates <- domainNamesUkIndicator %>%  get_dupes(`Account Number`) #Many duplicates as expected
+
+#Produce the final domain dataset to be joined with the licence register
+domainNamesCleansed <- domainNamesUkIndicator %>% filter(UkIndicator == 1) %>% select(`Account Number`,Cleansed_Domain_Name)
+domainNamesCleansed <- domainNamesCleansed %>% group_by(`Account Number`) %>%  summarise(Active_UK_Domains = n())
+
+```
+
+Only the account numbers corresponding to one or more websites with active UK domains will be included in the analysis in the main script. I considered analysing website names or concatenating them (similarly to what was done to activities in licence register), but decided against such effort because it is likely it would not add any value to the analysis. The only information I will extract will be the number of UK domains per account holder. Also, it is clear that the domain names do not follow a specific structure (some have 'https://' at the beginning, some include specific links after slashes, etc.), hence there is no value in flagging anomalies that are routinely present in the dataset.
+
+Two remaining datasets (businesses and trading names) should have one row per account number. Let's check if it's true
+
+``` {r businesses_trading_names}
+
+businessesRaw <- read_csv("https://www.gamblingcommission.gov.uk/downloads/business-licence-register-businesses.csv") 
+businessesDuplicates <- businessesRaw %>%  get_dupes(`Account Number`) #No duplicates - good!
+
+tradingNamesRaw <- read_csv("https://www.gamblingcommission.gov.uk/downloads/business-licence-register-trading-names.csv")
+tradingNamesDuplicates <- tradingNamesRaw %>%  get_dupes(`Account Number`) #There are duplicates
+tradingNamesStatusesDuplicates <- tradingNamesRaw %>%  get_dupes(`Account Number`,Status) #There are less duplicates - there are account numbers with trading names of various statuses
+
+```
+
+In the main script, the business register will be checked for duplicates, and a warning will be produced if any are encountered.
+
+Including the active trading names of the businesses in the analysis is my understanding of the task, as I was asked to 'automatically extract the list of licence holders that should be registered with Gamstop'. I understood that including all the relevant data for each licence holder makes sense, and I concluded that the (active) trading names are a relevant piece of data for the licence holders. However, I will not check for any new statuses of the trading names in the main script, as no filters are based on the trading names (this data is secondary to licence register and domain names register that define the population).
+
+Filter the trading names dataset so that only the active trading names are present, and concatenate all active trading names for each account number.
+
+``` {r cleanse_trading_names}
+
+
+tradingNamesCleansed <- tradingNamesRaw %>% filter(Status == "Active") %>% select(c("Account Number","Trading Name"))
+
+#Concatenate trading names per account
+tradingNamesCatted <- tradingNamesCleansed %>%
+  group_by(`Account Number`) %>%
+  summarise(Trading_Names_Catted = str_c(`Trading Name`, collapse = ', '), .groups = 'drop')
+
+```
+
+At this point, I am satisfied that the 4 datasets (licence register, list of domains, businesses register and trading names dataset) are reviewed, and that they will be reviewed and cleansed in the main script and warnings will be produced if any problems (described earlier) arise. Now I will join them and think about summary statistics and visualisation methods I can use.
+
+Note that while licence register and domain data have to be present for an account to be included in the analysis (as we filter on the activity, type, and status of the licence, and also on the presence of UK domains for a specific account), business name or trading name are optional. Hence, having made sure that my datasets are free of duplicates, I will:
+1. Inner-join licence register and domain names data (as per the above).
+2. Outer-join business and trading names (as they are both optional and we just want as much data as possible).
+3. Left-join the datasets from 1 and 2 (so that the trading names and business names are provided where the licence and domain data is present).
+
+``` {r join_the_four_datasets}
+
+finalData <- inner_join(licenceRegisterFilteredCleansed, domainNamesCleansed, by = "Account Number") #The number of account numbers at this stage rose from 76 to 161 after including the domains ending with 'com'
+intermediateNamesData <- full_join(businessesRaw,tradingNamesCatted,by = "Account Number") #Turns out there are no trading names without corresponding business names - makes sense
+finalData <- left_join(finalData,intermediateNamesData, by = "Account Number") #It could have been an inner join with the same effect, but the left join emphasises that it is the licence register and domain names data that is essential
+
+```
+
+Final data includes 161 businesses then. For the stats/visualisations, I think it may be worth to get the numbers of trading names and activities the businesses are involved in, and bin them to produce bar plots. I may have produced those numbers earlier, but doing it now will be just fine. Also, it will be useful to get the year of the start date of the earliest licence.
+
+``` {r get_numbers_of_trading_names_and_activities}
+
+#Get numbers of commas in respective columns and add 1 for activities (as there is always at least 1 activity the business is engaged in, and no commas mean there is 1 activity in total) and 0 or 1 for trading names (an NA in Trading_Names_Catted will result in 0 in Trading_Names_Count)
+plottingData <- finalData %>% mutate (Activities_Count = 1+str_count(Activity_Catted, ","), Trading_Names_Count = as.double(!is.na(Trading_Names_Catted))+str_count(paste("",Trading_Names_Catted,sep=""), ","))
+
+#For visualisations, it is better to put numeric values into categories to produce readable bar plots
+# Number of domains
+plottingData <- plottingData %>% 
+    mutate(DomainsNumberCategory = case_when(
+      Active_UK_Domains == 1 ~ '1',
+      (Active_UK_Domains > 1 & Active_UK_Domains < 4) ~ '2 to 3',
+      (Active_UK_Domains > 3 & Active_UK_Domains < 7) ~ '4 to 6',
+      (Active_UK_Domains > 6 & Active_UK_Domains < 11) ~ '7 to 10',
+      TRUE ~ 'Over 10'))
+#Number of trading names
+plottingData <- plottingData %>% 
+    mutate(TradingNamesNumberCategory = case_when(
+      Trading_Names_Count == 0 ~ '0',
+      Trading_Names_Count == 1 ~ '1',
+      (Trading_Names_Count > 1 & Trading_Names_Count < 5) ~ '2 to 4',
+      (Trading_Names_Count > 4 & Trading_Names_Count < 11) ~ '5 to 10',
+      TRUE ~ 'Over 10'))
+#Year of the start date of the earliest licence
+plottingData <- plottingData %>% 
+  mutate(Min_Start_Year = substring(Min_Start_Date,1,4))
+
+
+```
+
+Looking at the data now, we have the fields to produce stats/visualisations for:
+1. Number of activities for each business
+2. the number of businesses engaging in each specific activity.
+3. Start dates summary.
+4. Number of active UK domains per business.
+5. Number of trading names provided per business.
+
+One could think of interactions between all of the above, but it seems an overkill to me at this stage. I will produce the summary stats for numeric fields (1,4,5) and basic graphs - PowerBI could be used as well, but time constraints, ease of reviewing the code, and simplicity of the task made me decide just to produce sumary stats and ggplot visualisations.
+
+Start with numeric fields summaries.
+
+``` {r numeric_fields_summaries}
+
+plottingData %>% summary()
+
+```
+
+It can be seen that:
+1. The maximum number of (active UK) domains for a business is 72 and belongs to '888 UK Limited'. There are several other businesses with 10 or more active UK domains and about 25% of businesses have 3 or more domains, but a typical business has got only one domain.
+2. The maximum number of activities per account number is 5 (note that potentially there could be 6 as per our filters). About 25% of businesses engage in 3 or more activities.
+3. Maximum number of trading names is 52 (licence account name is Skill On Net Limited). There are 4 businesses with over 10 trading names, but most businesses have either 1 or 0.
+
+Now I produce the plots I found the most sensible.
+
+``` {r barplots_and_histograms_for_numeric_fields}
+
+#Bar plot of counts of businesses per number of activities
+p1 <- ggplot(plottingData, aes(x=Activities_Count)) +
+  geom_bar(fill = "light blue") +
+  theme_minimal() +
+  labs(x = "Number of activities", y = "Count of businesses", title = "Counts of businesses engaging in specific numbers of activities")
+p1
+
+#Bar plot of counts of businesses per (binned) number of domains
+p2 <- ggplot(plottingData, aes(x=DomainsNumberCategory)) +
+  geom_bar(fill = "light blue") +
+  theme_minimal() +
+  labs(x = "Number of domains", y = "Count of businesses", title = "Counts of businesses against numbers of domains held")
+p2
+
+#Bar plot of counts of businesses per (binned) number of trading names
+p3 <- ggplot(plottingData, aes(x=TradingNamesNumberCategory)) +
+  geom_bar(fill = "light blue") +
+  theme_minimal() +
+  labs(x = "Number of trading names", y = "Count of businesses", title = "Counts of businesses against numbers of trading names")
+p3
+
+#Get counts of instances for each min_start_year to produce a line chart
+minYearSummary <- plottingData %>% group_by(Min_Start_Year) %>% summarise(Count = n())
+#Line chart to show how many businesses have (earliest) licences starting in a specific year
+p4 <- ggplot(minYearSummary, aes(x=Min_Start_Year,y=Count, group = 1)) +
+  geom_path(col="light blue", lwd = 2) + geom_point(col = "black") +
+  theme_minimal() +
+  labs(x = "Licence start year", y = "Count of businesses", title = "Counts of businesses against (minimum) licence start years")
+p4
+
+#Get counts of businesses engaging in each specific activity - note they cannot just be taken from the licence register as we inner-joined with domain names dataset
+countsOfBusinessesPerActivity <- data.frame(
+  Activity = c("Casino", "General Betting Standard - Real Event", "Pool Betting", "Bingo", "General Betting Standard - Virtual Event", "External Lottery Manager"), Businesses_Count = c(
+    sum(str_detect(plottingData$Activity_Catted,"Casino")),
+    sum(str_detect(plottingData$Activity_Catted,"General Betting Standard - Real Event")),
+    sum(str_detect(plottingData$Activity_Catted,"Pool Betting")),
+    sum(str_detect(plottingData$Activity_Catted,"Bingo")),
+    sum(str_detect(plottingData$Activity_Catted,"General Betting Standard - Virtual Event")),
+    sum(str_detect(plottingData$Activity_Catted,"External Lottery Manager"))))
+#Bar plot of number of businesses per activity
+p5 <- ggplot(countsOfBusinessesPerActivity, aes(y=reorder(Activity,Businesses_Count,sum),x=Businesses_Count)) +
+  geom_col(fill = "light blue") +
+  theme_minimal() +
+  labs(y = "", x = "Count of businesses", title = "Counts of businesses engaging in specific activities")
+p5
+
+```
+
+Now that the data is explored, potential and actual issues with the data are flagged, and the stats and visualisations are produced, we move over to the main script.

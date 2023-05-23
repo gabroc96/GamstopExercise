@@ -1,0 +1,244 @@
+---
+title: "Licence holders main script"
+author: "Gabriel"
+date: "22/05/2023"
+output: html_document
+---
+
+This script extracts the list of licence holders that should be registered with Gamstop.
+
+The reasons behind performing specific operations in this script are laid out in Licence_Holders_Testing.
+
+I am keeping this script as brief as possible - here the relevant data is extracted and worked on to create the list. No summary statistics or visualisations are produced here, because I don't think we would need new visualisations as often as we will need to update the licence holders dataset (of course they could be updated as well). Warnings are created at the end of the script if necessary.
+
+Start with loading the licence register data.
+
+
+``` {r load_licence_register}
+
+#Load the libraries needed in this script
+library(readr) #To load the datasets
+library(tidyverse) #To manipulate the data in tidyverse
+library(janitor) #To spot duplicates
+
+#Load the licence register
+licenceRegisterRaw <- read_csv("https://www.gamblingcommission.gov.uk/downloads/business-licence-register-licences.csv",
+                               col_types = cols(
+  `Account Number` = col_double(),
+  `Licence Number` = col_character(),
+  Status = col_character(),
+  Type = col_character(),
+  Activity = col_character(),
+  `Start Date` = col_datetime(format = ""),
+  `End Date` = col_datetime(format = "")
+))
+
+```
+
+Filter the licence register. 
+
+``` {r filter_licence_register}
+
+#Filters as per the tasking
+licenceRegisterFiltered <- licenceRegisterRaw %>% filter(Status == "Active" & Type == "Remote" & Activity %in% c("Bingo","Casino","External Lottery Manager", "General Betting Standard - Real Event", "General Betting Standard - Virtual Event", "Pool Betting")) %>% select(c(`Account Number`,`Licence Number`,Activity, `Start Date`))
+
+```
+
+Extract minimum licence start dates, concatenate activity types, remove duplicates. 
+
+``` {r cleanse_licences_data}
+
+#Concatenate activities per account
+licenceRegisterFilteredActivitiesCatted <- licenceRegisterFiltered %>%
+  group_by(`Account Number`) %>%
+  summarise(Activity_Catted = str_c(Activity, collapse = ', '), .groups = 'drop')
+
+#Get the minimum start date for the licences of each account number
+licenceRegisterFilteredMinDates <- licenceRegisterFiltered %>% 
+  group_by(`Account Number`) %>% 
+  summarise(Min_Start_Date = min(`Start Date`))
+
+#Join account and licence numbers with concatenated activities
+licenceRegisterFilteredCleansed <- inner_join(licenceRegisterFiltered %>% select(`Account Number`,`Licence Number`) %>% distinct(), licenceRegisterFilteredActivitiesCatted, by = "Account Number")
+
+#Join account and licence numbers and concatenated activity types with minimum start dates
+licenceRegisterFilteredCleansed <- inner_join(licenceRegisterFilteredCleansed, licenceRegisterFilteredMinDates, by = "Account Number") 
+```
+
+Load domain names dataset.
+
+``` {r domain_names_raw}
+
+domainNamesRaw <- read_csv("https://www.gamblingcommission.gov.uk/downloads/business-licence-register-domain-names.csv",
+                           col_types = cols(
+  `Account Number` = col_double(),
+  `Domain Name` = col_character(),
+  Status = col_character()
+)) 
+
+```
+  
+Cleanse domain names, filter out non-UK and non-active domains, sum up the number of actve UK domains per licence holder.
+
+``` {r domains_review_and_filter}
+
+#Operations will be performed on a newly created dataset rather than on the raw data. Filter out non-active domains
+domainNamesUkIndicator <- domainNamesRaw %>% mutate(Cleansed_Domain_Name = `Domain Name`) %>% filter(Status == "Active")
+
+#Removal of 'https://'
+domainNamesUkIndicator <- domainNamesUkIndicator %>%  mutate(Cleansed_Domain_Name = ifelse(startsWith(Cleansed_Domain_Name,"https://"),substring(Cleansed_Domain_Name,9),Cleansed_Domain_Name))
+
+#Same for 'http://'
+domainNamesUkIndicator <- domainNamesUkIndicator %>%  mutate(Cleansed_Domain_Name = ifelse(startsWith(Cleansed_Domain_Name,"http://"),substring(Cleansed_Domain_Name,8),Cleansed_Domain_Name))
+
+#Remove anything after the first slash
+domainNamesUkIndicator <- domainNamesUkIndicator %>% mutate(Cleansed_Domain_Name = gsub("/.*","",Cleansed_Domain_Name))
+
+#Produce the 'uk' indicator and look at the numbers of UK and non-UK domains
+domainNamesUkIndicator <- domainNamesUkIndicator %>% mutate(UkIndicator = ifelse(endsWith(Cleansed_Domain_Name,"uk") | endsWith(Cleansed_Domain_Name,"com"),1,0))
+
+#Produce the final domain dataset to be joined with the licence register
+domainNamesCleansed <- domainNamesUkIndicator %>% filter(UkIndicator == 1) %>% select(`Account Number`,Cleansed_Domain_Name)
+domainNamesCleansed <- domainNamesCleansed %>% group_by(`Account Number`) %>%  summarise(Active_UK_Domains = n())
+
+```
+
+Load businesses register data.
+
+``` {r businesses_register}
+
+businessesRaw <- read_csv("https://www.gamblingcommission.gov.uk/downloads/business-licence-register-businesses.csv",
+                          col_types = cols(
+  `Account Number` = col_double(),
+  `Licence Account Name` = col_character()
+)) 
+
+```
+
+Load trading names data. Filter the trading names dataset so that only the active trading names are present, and concatenate all active trading names for each account number.
+
+``` {r cleanse_trading_names}
+
+tradingNamesRaw <- read_csv("https://www.gamblingcommission.gov.uk/downloads/business-licence-register-trading-names.csv",
+                            col_types = cols(
+  `Account Number` = col_double(),
+  `Trading Name` = col_character(),
+  Status = col_character()
+))
+
+tradingNamesCleansed <- tradingNamesRaw %>% filter(Status == "Active") %>% select(c("Account Number","Trading Name"))
+
+#Concatenate trading names per account
+tradingNamesCatted <- tradingNamesCleansed %>%
+  group_by(`Account Number`) %>%
+  summarise(Trading_Names_Catted = str_c(`Trading Name`, collapse = ', '), .groups = 'drop')
+
+```
+
+Join datasets to create the final list.
+
+``` {r join_the_four_datasets}
+
+finalData <- inner_join(licenceRegisterFilteredCleansed, domainNamesCleansed, by = "Account Number")
+intermediateNamesData <- full_join(businessesRaw,tradingNamesCatted,by = "Account Number")
+finalData <- left_join(finalData,intermediateNamesData, by = "Account Number")
+
+```
+
+Produce warnings where necessary. I would output them into a .txt file for a non-technical colleague to be able to see them as a next step.
+
+``` {r warnings}
+
+##### ===== Licence register data ===== #####
+
+#Column names/order
+if(sum(names(licenceRegisterRaw) != c("Account Number","Licence Number","Status","Type","Activity","Start Date","End Date")) > 0) warning("Column order, the number of columns or their names were changed in the licence register")
+
+#NAs in non-date fields
+if(sum(is.na(licenceRegisterRaw %>% select(-c(`Start Date`,`End Date`))))) warning("There are missing values in non-date fields of the licence register")
+
+#Missing start dates in non-pending licences
+if(sum(is.na(licenceRegisterRaw %>% filter(Status != "Pending") %>% select(`Start Date`)))) warning("Licence start date is missing for one or more non-pending licences")
+
+#Missing end dates for statuses other than 'Active' or 'Pending'
+if(sum(is.na(licenceRegisterRaw %>% filter(Status != "Pending" & Status != "Active") %>% select(`End Date`)))) warning("There is at least one licence without an end date, the status of which is neither 'Active' nor 'Pending'")
+
+#Missing end dates when the licence status is 'active' or 'pending'
+if(sum(!is.na(licenceRegisterRaw %>% filter(Status == "Pending" | Status == "Active") %>% select(`End Date`)))) warning("There is an 'Active' or 'Pending' licence with an end date")
+
+#Pure duplicates in the licence register
+if(sum(duplicated(licenceRegisterRaw %>% filter(Status != "Pending"))) > 0) warning("There are pure duplicates in the licence register other than when the status is 'Pending'")
+
+#A value of status field not seen before - base R '$' symbol used
+if(sum(!(licenceRegisterRaw$Status %in% c("Active","Surrendered","Revoked - Non Payment of Fee","Lapsed","Suspended","Revoked","Pending","Forfeited") > 0))) warning("There are licence statuses that were not seen before")
+
+#A value of type field not seen before - base R '$' symbol used
+if(sum(!(licenceRegisterRaw$Type %in% c("Non-Remote","Ancillary Remote","Remote") > 0))) warning("There are licence types listed that were not seen before")
+
+#A value of activity field not seen before - base R '$' symbol used
+if(sum(!(licenceRegisterRaw$Activity %in% c("Gaming Machine General Adult Gaming Centre","Linked Gaming Machine Technical Supplier",
+ "General Betting Limited",                            "General Betting Standard",                          
+ "Gaming Machine Technical Supplier",                  "Casino 1968 Act",                                   
+ "Casino 2005 Act",                                    "Casino",                                            
+ "Gaming Machine General Family Entertainment Centre", "General Betting Standard - No Gaming Machines",     
+ "General Betting Standard - Real Event",              "General Betting Standard - Virtual Event",          
+ "Pool Betting",                                       "Gaming Machine Technical Full",                     
+ "Gambling Software",                                  "Bingo",                                             
+ "Linked Gambling Software",                           "External Lottery Manager",                          
+ "Society Lottery",                                    "Betting Host (Virtual Events)",                     
+ "Game Host (Casino)",                                 "Gaming Machine Technical Software",                 
+ "Betting Intermediary",                               "Game Host (Bingo)",                                 
+ "Betting Host (Real Events)",                         "Betting Intermediary - Trading Rooms Only") > 0))) warning("There are          activities listed that were not seen before")
+
+#After filtering out non-remote types and non-active statuses, were there any instances of multiple licence numbers per account number?
+if(nrow(licenceRegisterFiltered %>%  get_dupes(`Account Number`,`Licence Number`)) != nrow(licenceRegisterFiltered %>%  get_dupes(`Account Number`))) warning("There are multiple licence numbers per account number where the licence status is active and the licence type is remote")
+
+##### ==== Domain names data ===== #####
+
+#Column names/order
+if(sum(names(domainNamesRaw) != c("Account Number","Domain Name","Status")) > 0) warning("Column order, the number of columns or their names were changed in the domains dataset")
+
+#NAs present?
+if(sum(is.na(domainNamesRaw) > 0)) warning("There are missing values in the domains dataset")
+
+#A value of status field not seen before - base R '$' symbol used
+if(sum(!(domainNamesRaw$Status %in% c("Active","Inactive","White Label") > 0))) warning("There are domain names statuses that were not seen before")
+
+##### ==== Business names data ===== #####
+
+#Column names/order
+if(sum(names(businessesRaw) != c("Account Number","Licence Account Name")) > 0) warning("Column order, the number of columns or their names were changed in the business names dataset")
+
+#NAs present?
+if(sum(is.na(businessesRaw) > 0)) warning("There are missing values in the business names dataset")
+
+##### ==== Trading names data ===== #####
+
+#Column names/order
+if(sum(names(tradingNamesRaw) != c("Account Number","Trading Name","Status")) > 0) warning("Column order, the number of columns or their names were changed in the trading names dataset")
+
+#NAs present?
+if(sum(is.na(tradingNamesRaw) > 0)) warning("There are missing values in the trading names dataset")
+
+#A value of status field not seen before - base R '$' symbol used
+if(sum(!(tradingNamesRaw$Status %in% c("Active","Inactive") > 0))) warning("There are trading names statuses that were not seen before")
+
+```
+
+In principle, the coding exercise finishes here. The 'finalData' would be compared with its previous version (e.g. by using all.equal() function from dplyr library or otherwise). If there are discrepancies, they can be flagged using setdiff(), e.g.
+
+``` {r setdiff}
+
+f <- finalData
+all.equal(finalData,f) #TRUE as they are equal now
+
+f <- f[-43,] #Remove row 43
+f[10,1] <- 1 #Change account number in 10th row to 1
+all.equal(finalData,f) #Gives some indication as to what the problem may be
+setdiff(finalData,f) #Both rows output - one removed and one corrupted by myself. Note even though the row index got broken, setdiff does not show n - 43 differences, but only 2
+
+```
+
+'finalData' would be output using write.csv so that the colleagues can work on it in Excel. The discrepancies from setdiff could also be output into .csv format for the colleagues to analyse (note setdiff is not symmetrical, so I may need setdiff(a,b) and setdiff(b,a) at the same time). Any differences in column names would be major changes and would be flagged by warnings in code apart from whatever differences all.equal and setdiff may give. The code could be run by anyone who can have access to R and can click ctrl+alt+r. The script could also be scheduled to run at certain times, so that the script is run automatically even if there is no one with access to R around. There are ways to output the warning messages to a .txt file as well, e.g. using the sink() function.
+
+I proceed to producing the presentation based on the findings from the two scripts.
